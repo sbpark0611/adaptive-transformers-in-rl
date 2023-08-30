@@ -1,0 +1,3 @@
+Saving logs data to ./logs/torchbeast/torchbeast-20230830-200448/logs.csv
+Saving logs' fields to ./logs/torchbeast/torchbeast-20230830-200448/fields.csv
+Updated log fields: ['_tick', '_time', 'step', 'total_loss', 'mean_episode_return', 'last_100_episode_returns', 'max_return_achieved', 'pg_loss', 'baseline_loss', 'entropy_loss', 'learning_rate']

@@ -38,8 +38,11 @@ except:
     print('NO DMLAB module') #is for case where using Atari on machine without dmlab
 
 from Model.core import prof, vtrace, file_writer
-from Model.core import environment as atari_environment
+from Model.core import environment as environment
 from Model import atari_wrappers
+
+from memory_planning_game import MemoryPlanningGame
+import mpg_wrappers
 
 # yapf: disable
 parser = argparse.ArgumentParser(description="PyTorch Scalable Agent")
@@ -63,7 +66,7 @@ parser.add_argument("--n_layer", default=4, type=int,
                     help="num layers in transformer decoder")
 parser.add_argument("--d_inner", default=2048, type=int,
                     help="the position wise ff network dimension -> d_model x d_inner")
-parser.add_argument("--use_gate", action='store_true',
+parser.add_argument("--use_gate", default=True, action='store_true',
                     help="whether to use gating in transformer decoder")
 
 
@@ -92,7 +95,9 @@ parser.add_argument('--learner_no_mem', action='store_true',
 parser.add_argument('--debug', action='store_true',
                     help='set logging level to debug')
 parser.add_argument("--atari", default=False, type=bool,
-                    help="Whether to run atari (otherwise runs DMLab)")
+                    help="Whether to run atari")
+parser.add_argument("--dmlab", default=False, type=bool,
+                    help="Whether to run DMLab")
 
 parser.add_argument("--disable_checkpoint", action="store_true",
                     help="Disable saving checkpoint.")
@@ -100,9 +105,9 @@ parser.add_argument("--savedir", default="./logs/torchbeast",
                     help="Root dir where experiment data will be saved.")
 parser.add_argument("--num_actors", default=32, type=int, metavar="N",
                     help="Number of actors (default: 4).")
-parser.add_argument("--total_steps", default=100000, type=int, metavar="T",
+parser.add_argument("--total_steps", default=1000000, type=int, metavar="T",
                     help="Total environment steps to train for.")
-parser.add_argument("--batch_size", default=16, type=int, metavar="B",
+parser.add_argument("--batch_size", default=128, type=int, metavar="B",
                     help="Learner batch size.")
 parser.add_argument("--unroll_length", default=1000, type=int, metavar="T",
                     help="The unroll length (time dimension).")
@@ -112,13 +117,13 @@ parser.add_argument("--num_learner_threads", "--num_threads", default=4, type =i
                     metavar="N", help="Number learner threads.")
 parser.add_argument("--disable_cuda", action="store_true",
                     help="Disable CUDA.")
-parser.add_argument("--chunk_size", default=100, type=int,
+parser.add_argument("--chunk_size", default=128, type=int,
                     help="Size of chunks to chop batch into")
-parser.add_argument("--mem_len", default=100, type=int,
+parser.add_argument("--mem_len", default=128, type=int,
                     help="Length of memory segment for TXL")
 parser.add_argument('--use_pretrained', action='store_true',
                     help='use the pretrained model identified by --xpid')
-parser.add_argument('--action_repeat', default=4, type=int,
+parser.add_argument('--action_repeat', default=1, type=int,
                     help='number of times to repeat an action, default=4')
 parser.add_argument('--stats_episodes', default=100, type=int,
                     help='report the mean episode returns of the last n episodes')
@@ -132,7 +137,7 @@ parser.add_argument("--entropy_cost", default=0.01,
                     type=float, help="Entropy cost/multiplier.")
 parser.add_argument("--baseline_cost", default=0.5,
                     type=float, help="Baseline cost/multiplier.")
-parser.add_argument("--discounting", default=0.99,
+parser.add_argument("--discounting", default=0.95,
                     type=float, help="Discounting factor.")
 parser.add_argument("--reward_clipping", default="abs_one",
                     choices=["abs_one", "none"],
@@ -147,7 +152,7 @@ parser.add_argument("--alpha", default=0.99, type=float,
                     help="RMSProp smoothing constant.")
 parser.add_argument("--momentum", default=0, type=float,
                     help="momentum for SGD or RMSProp")
-parser.add_argument("--epsilon", default=0.01, type=float,
+parser.add_argument("--epsilon", default=0.0001, type=float,
                     help="RMSProp epsilon.")
 parser.add_argument("--grad_norm_clipping", default=40.0, type=float,
                     help="Global gradient norm clip.")
@@ -161,7 +166,7 @@ parser.add_argument('--warmup_step', type=float, default=0,
                     help='upper epoch limit')
 parser.add_argument('--steps_btw_sched_updates', type=int, default=10000,
                     help='number of steps between scheduler updates')
-parser.add_argument('--decay_rate', type=float, default=0.5,
+parser.add_argument('--decay_rate', type=float, default=0.99,
                     help='decay factor when ReduceLROnPlateau is used')
 parser.add_argument('--lr_min', type=float, default=0.0,
                     help='minimum learning rate during annealing')
@@ -233,11 +238,11 @@ def act(
         seed = actor_index ^ int.from_bytes(os.urandom(4), byteorder="little")
         # gym_env.seed(seed)
         gym_env = create_env(flags=flags, seed=seed)
-        if flags.atari:
-            env = atari_environment.Environment(gym_env)
-        else:
+        if flags.dmlab:
             #DMLAB CHANGES
             env = dmlab_environment.Environment(gym_env)
+        else:
+            env = environment.Environment(gym_env)
 
         env_output = env.initial()
         env_output['done'] = torch.tensor([[0]], dtype=torch.uint8)
@@ -711,11 +716,14 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         """model is each of the actors, running parallel. The upcoming block ctx.Process(...)"""
         model = Net(env.observation_space.shape, env.action_space.n, flags=flags)
         buffers = create_buffers(flags, env.observation_space.shape, model.num_actions)
-    else:
+    elif flags.dmlab:
         # DMLAB CHANGES
         """model is each of the actors, running parallel. The upcoming block ctx.Process(...)"""
         model = Net(env.initial().shape, len(dmlab_environment.DEFAULT_ACTION_SET), flags=flags)
         buffers = create_buffers(flags, env._observation().shape, model.num_actions)
+    else:
+        model = Net(env.observation_space.shape, env.action_space.n, flags=flags)
+        buffers = create_buffers(flags, env.observation_space.shape, model.num_actions)
 
     model.share_memory()
 
@@ -753,11 +761,15 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
     if flags.atari:
         learner_model = Net(
             env.observation_space.shape, env.action_space.n, flags=flags).to(device=flags.device)
-    else:
+    elif flags.dmlab:
         # DMLAB CHANGES
         learner_model = Net(
             env._observation().shape, len(dmlab_environment.DEFAULT_ACTION_SET), flags=flags).to(device=flags.device)
         # DMLAB CHANGES END
+    else:
+        learner_model = Net(
+            env.observation_space.shape, env.action_space.n, flags=flags).to(device=flags.device)
+
 
     print('--------------- TOTAL MODEL PARAMETERS : {} ---------------'.format(get_model_parameters(learner_model)))
 
@@ -985,11 +997,11 @@ def test(flags, num_episodes: int = 10):
         )
 
     gym_env = create_env(flags)
-    if flags.atari:
-        env = atari_environment.Environment(gym_env)
-    else:
+    if flags.dmlab:
         #DMLAB CHANGES
         env = dmlab_environment.Environment(gym_env)
+    else:
+        env = environment.Environment(gym_env)
 
     if flags.atari:
         model = Net(env.gym_env.observation_space.shape, env.action_space.n, flags=flags)
@@ -1200,24 +1212,30 @@ class AtariNet(nn.Module):
         '''
 
     def forward(self, inputs, core_state=(), mems=None):
-
         x = inputs["frame"]
         T, B, *_ = x.shape
         x = torch.flatten(x, 0, 1)  # Merge time and batch.
-        x = x.float() / 255.0
+        
+        if flags.atari or flags.dmlab:
+            x = x.float() / 255.0
+            for i, fconv in enumerate(self.feat_convs):
+                x = fconv(x)
+                res_input = x
+                x = self.resnet1[i](x)
+                x += res_input
+                res_input = x
+                x = self.resnet2[i](x)
+                x += res_input
+            x = F.relu(x)
+            x = x.view(T * B, -1)
+            # print('x shape : ',x.shape)
+            x = F.relu(self.fc(x))
 
-        for i, fconv in enumerate(self.feat_convs):
-            x = fconv(x)
-            res_input = x
-            x = self.resnet1[i](x)
-            x += res_input
-            res_input = x
-            x = self.resnet2[i](x)
-            x += res_input
-        x = F.relu(x)
-        x = x.view(T * B, -1)
-        # print('x shape : ',x.shape)
-        x = F.relu(self.fc(x))
+        else:
+            x = x.view(T * B, -1)
+            fc1 = nn.Linear(4, 256 - self.num_actions - 1)
+            x = x.to(fc1.weight.dtype)
+            x = F.relu(fc1(x))
 
         #logging.debug('In Atari net shape inputs: {}'.format(inputs['done'].shape))
         # print('inputs: ', inputs)
@@ -1308,6 +1326,15 @@ Net = AtariNet
 
 def create_env(flags, seed=1):
 
+    if flags.dmlab:
+        level_name = 'contributed/dmlab30/' + flags.level_name
+        config = {
+            'width': 96,
+            'height': 72,
+            'logLevel': 'WARN',
+        }
+        return dmlab_wrappers.createDmLab(level_name, config, seed)
+    
     if flags.atari:
         return atari_wrappers.wrap_pytorch(
             atari_wrappers.wrap_deepmind(
@@ -1317,15 +1344,10 @@ def create_env(flags, seed=1):
                 scale=False,
             )
         )
-
-    level_name = 'contributed/dmlab30/' + flags.level_name
-    config = {
-        'width': 96,
-        'height': 72,
-        'logLevel': 'WARN',
-    }
-    return dmlab_wrappers.createDmLab(level_name, config, seed)
-
+    
+    return mpg_wrappers.wrap_initial(
+        MemoryPlanningGame()
+    )
 
 def get_model_parameters(model):
     total_parameters = 0
